@@ -64,7 +64,12 @@ function installQuestions() {
 			CLIENT_DNS_2="${CLIENT_DNS_1}"
 		fi
 	done
-
+	
+	# RAM check
+	until [[ $SERVER_RAM =~ ^[0-9]+$ ]]; do
+		read -rp "RAM size of your server: " -e -i 1024 SERVER_RAM
+	done
+	
 	echo ""
 	echo "Okay, that was all I needed. We are ready to setup your WireGuard server now."
 	echo "You will be able to generate a client at the end of the installation."
@@ -92,7 +97,28 @@ function installWireGuard() {
 	cd /usr/local/src 
 	wget https://git.zx2c4.com/wireguard-go/snapshot/wireguard-go-0.0.20210212.tar.xz
 	tar xvf wireguard-go-0.0.20210212.tar.xz
-	cd wireguard-go-0.0.20210212.tar.xz
+	cd wireguard-go-0.0.20210212
+	
+	if [[ ${SERVER_RAM} -lt 256 ]]; then
+		echo "// +build ios
+
+/* SPDX-License-Identifier: MIT
+ *
+ * Copyright (C) 2017-2019 WireGuard LLC. All Rights Reserved.
+ */
+
+package device
+
+/* Fit within memory limits for iOS's Network Extension API, which has stricter requirements */
+
+const (
+        QueueOutboundSize          = 1024
+        QueueInboundSize           = 1024
+        QueueHandshakeSize         = 1024
+        MaxSegmentSize             = 1700
+        PreallocatedBuffersPerPool = 1024
+)" >device/queueconstants_ios.go
+	fi
 	
 	# Install 
 	make
