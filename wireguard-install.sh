@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Secure WireGuard server installer for Debian, Ubuntu, CentOS, Fedora and Arch Linux
-# https://github.com/angristan/wireguard-install
+# Secure WireGuard userspace server installer for Ubuntu on OpenVZ
+# https://github.com/fullcounterr/wireguard-openvz-install
 
 function isRoot() {
 	if [ "${EUID}" -ne 0 ]; then
@@ -10,56 +10,13 @@ function isRoot() {
 	fi
 }
 
-function checkVirt() {
-	if [ "$(systemd-detect-virt)" == "openvz" ]; then
-		echo "OpenVZ is not supported"
-		exit 1
-	fi
-
-	if [ "$(systemd-detect-virt)" == "lxc" ]; then
-		echo "LXC is not supported (yet)."
-		echo "WireGuard can technically run in an LXC container,"
-		echo "but the kernel module has to be installed on the host,"
-		echo "the container has to be run with some specific parameters"
-		echo "and only the tools need to be installed in the container."
-		exit 1
-	fi
-}
-
-function checkOS() {
-	# Check OS version
-	if [[ -e /etc/debian_version ]]; then
-		source /etc/os-release
-		OS="${ID}" # debian or ubuntu
-		if [[ ${ID} == "debian" || ${ID} == "raspbian" ]]; then
-			if [[ ${VERSION_ID} -ne 10 ]]; then
-				echo "Your version of Debian (${VERSION_ID}) is not supported. Please use Debian 10 Buster"
-				exit 1
-			fi
-		fi
-	elif [[ -e /etc/fedora-release ]]; then
-		source /etc/os-release
-		OS="${ID}"
-	elif [[ -e /etc/centos-release ]]; then
-		source /etc/os-release
-		OS=centos
-	elif [[ -e /etc/arch-release ]]; then
-		OS=arch
-	else
-		echo "Looks like you aren't running this installer on a Debian, Ubuntu, Fedora, CentOS or Arch Linux system"
-		exit 1
-	fi
-}
-
 function initialCheck() {
 	isRoot
-	checkVirt
-	checkOS
 }
 
 function installQuestions() {
 	echo "Welcome to the WireGuard installer!"
-	echo "The git repository is available at: https://github.com/angristan/wireguard-install"
+	echo "The git repository is available at: https://github.com/fullcounterr/wireguard-install"
 	echo ""
 	echo "I need to ask you a few questions before starting the setup."
 	echo "You can leave the default options and just press enter if you are ok with them."
@@ -118,41 +75,28 @@ function installWireGuard() {
 	# Run setup questions first
 	installQuestions
 
-	# Install WireGuard tools and module
-	if [[ ${OS} == 'ubuntu' ]]; then
-		apt-get update
-		apt-get install -y wireguard iptables resolvconf qrencode
-	elif [[ ${OS} == 'debian' ]]; then
-		if ! grep -rqs "^deb .* buster-backports" /etc/apt/; then
-			echo "deb http://deb.debian.org/debian buster-backports main" >/etc/apt/sources.list.d/backports.list
-			apt-get update
-		fi
-		apt update
-		apt-get install -y iptables resolvconf qrencode
-		apt-get install -y -t buster-backports wireguard
-	elif [[ ${OS} == 'fedora' ]]; then
-		if [[ ${VERSION_ID} -lt 32 ]]; then
-			dnf install -y dnf-plugins-core
-			dnf copr enable -y jdoss/wireguard
-			dnf install -y wireguard-dkms
-		fi
-		dnf install -y wireguard-tools iptables qrencode
-	elif [[ ${OS} == 'centos' ]]; then
-		yum -y install epel-release elrepo-release
-		if [[ ${VERSION_ID} -eq 7 ]]; then
-			yum -y install yum-plugin-elrepo
-		fi
-		yum -y install kmod-wireguard wireguard-tools iptables qrencode
-	elif [[ ${OS} == 'arch' ]]; then
-		# Check if current running kernel is LTS
-		ARCH_KERNEL_RELEASE=$(uname -r)
-		if [[ ${ARCH_KERNEL_RELEASE} == *lts* ]]; then
-			pacman -S --needed --noconfirm linux-lts-headers
-		else
-			pacman -S --needed --noconfirm linux-headers
-		fi
-		pacman -S --needed --noconfirm wireguard-tools iptables qrencode
-	fi
+	# Prepare wireguard-tools
+	echo "deb http://deb.debian.org/debian/ unstable main" > /etc/apt/sources.list.d/unstable.list 
+	printf 'Package: *\nPin: release a=unstable\nPin-Priority: 90\n' > /etc/apt/preferences.d/limit-unstable 
+	apt-get update 
+	apt-get install build-essential wireguard-tools --no-install-recommends 
+	
+	# Compile go
+	cd /tmp 
+	wget https://dl.google.com/go/go1.13.4.linux-amd64.tar.gz 
+	tar zvxf go1.13.4.linux-amd64.tar.gz 
+	sudo mv go /opt/go1.13.4 
+	sudo ln -s /opt/go1.13.4/bin/go /usr/local/bin/go 
+	
+	# Compile wireguard-go
+	cd /usr/local/src 
+	wget https://git.zx2c4.com/wireguard-go/snapshot/wireguard-go-0.0.20210212.tar.xz
+	tar xvf wireguard-go-0.0.20210212.tar.xz
+	cd wireguard-go-0.0.20210212.tar.xz
+	
+	# Install 
+	make
+	sudo cp wireguard-go /usr/local/bin 
 
 	# Make sure the directory exists (this does not seem the be the case on fedora)
 	mkdir /etc/wireguard >/dev/null 2>&1
@@ -257,17 +201,6 @@ function newClient() {
 		fi
 	done
 
-	until [[ ${IPV6_EXISTS} == '0' ]]; do
-		read -rp "Client's WireGuard IPv6: ${SERVER_WG_IPV6::-1}" -e -i "${DOT_IP}" DOT_IP
-		CLIENT_WG_IPV6="${SERVER_WG_IPV6::-1}${DOT_IP}"
-		IPV6_EXISTS=$(grep -c "${CLIENT_WG_IPV6}" "/etc/wireguard/${SERVER_WG_NIC}.conf")
-
-		if [[ ${IPV6_EXISTS} == '1' ]]; then
-			echo ""
-			echo "A client with the specified IPv6 was already created, please choose another IPv6."
-			echo ""
-		fi
-	done
 
 	# Generate key pair for the client
 	CLIENT_PRIV_KEY=$(wg genkey)
@@ -286,7 +219,7 @@ function newClient() {
 	# Create client file and add the server as a peer
 	echo "[Interface]
 PrivateKey = ${CLIENT_PRIV_KEY}
-Address = ${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128
+Address = ${CLIENT_WG_IPV4}/32
 DNS = ${CLIENT_DNS_1},${CLIENT_DNS_2}
 
 [Peer]
@@ -300,7 +233,7 @@ AllowedIPs = 0.0.0.0/0,::/0" >>"${HOME_DIR}/${SERVER_WG_NIC}-client-${CLIENT_NAM
 [Peer]
 PublicKey = ${CLIENT_PUB_KEY}
 PresharedKey = ${CLIENT_PRE_SHARED_KEY}
-AllowedIPs = ${CLIENT_WG_IPV4}/32,${CLIENT_WG_IPV6}/128" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
+AllowedIPs = ${CLIENT_WG_IPV4}/32" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 
 	systemctl restart "wg-quick@${SERVER_WG_NIC}"
 
@@ -343,55 +276,6 @@ function revokeClient() {
 	systemctl restart "wg-quick@${SERVER_WG_NIC}"
 }
 
-function uninstallWg() {
-	echo ""
-	read -rp "Do you really want to remove WireGuard? [y/n]: " -e -i n REMOVE
-	if [[ $REMOVE == 'y' ]]; then
-		checkOS
-
-		systemctl stop "wg-quick@${SERVER_WG_NIC}"
-		systemctl disable "wg-quick@${SERVER_WG_NIC}"
-
-		if [[ ${OS} == 'ubuntu' ]]; then
-			apt-get autoremove --purge -y wireguard qrencode
-		elif [[ ${OS} == 'debian' ]]; then
-			apt-get autoremove --purge -y wireguard qrencode
-		elif [[ ${OS} == 'fedora' ]]; then
-			dnf remove -y wireguard-tools qrencode
-			if [[ ${VERSION_ID} -lt 32 ]]; then
-				dnf remove -y wireguard-dkms
-				dnf copr disable -y jdoss/wireguard
-			fi
-			dnf autoremove -y
-		elif [[ ${OS} == 'centos' ]]; then
-			yum -y remove kmod-wireguard wireguard-tools qrencode
-			yum -y autoremove
-		elif [[ ${OS} == 'arch' ]]; then
-			pacman -Rs --noconfirm wireguard-tools qrencode
-		fi
-
-		rm -rf /etc/wireguard
-		rm -f /etc/sysctl.d/wg.conf
-
-		# Reload sysctl
-		sysctl --system
-
-		# Check if WireGuard is running
-		systemctl is-active --quiet "wg-quick@${SERVER_WG_NIC}"
-		WG_RUNNING=$?
-
-		if [[ ${WG_RUNNING} -eq 0 ]]; then
-			echo "WireGuard failed to uninstall properly."
-			exit 1
-		else
-			echo "WireGuard uninstalled successfully."
-			exit 0
-		fi
-	else
-		echo ""
-		echo "Removal aborted!"
-	fi
-}
 
 function manageMenu() {
 	echo "Welcome to WireGuard-install!"
@@ -402,8 +286,7 @@ function manageMenu() {
 	echo "What do you want to do?"
 	echo "   1) Add a new user"
 	echo "   2) Revoke existing user"
-	echo "   3) Uninstall WireGuard"
-	echo "   4) Exit"
+	echo "   3) Exit"
 	until [[ ${MENU_OPTION} =~ ^[1-4]$ ]]; do
 		read -rp "Select an option [1-4]: " MENU_OPTION
 	done
@@ -415,15 +298,12 @@ function manageMenu() {
 		revokeClient
 		;;
 	3)
-		uninstallWg
-		;;
-	4)
 		exit 0
 		;;
 	esac
 }
 
-# Check for root, virt, OS...
+# Install wireguard
 initialCheck
 
 # Check if WireGuard is already installed and load params
